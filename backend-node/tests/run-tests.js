@@ -19,12 +19,13 @@ const testTracked = {
   tokenIds: [],
 };
 
-function request(method, path, body = null, token = null) {
+function request(method, path, body = null, token = null, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, baseUrl);
     const headers = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
+      ...extraHeaders,
     };
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
@@ -512,6 +513,38 @@ async function runTests() {
       'Auth Feature: POST /api/logout',
       logoutRes.status === 200,
       `status=${logoutRes.status}`
+    );
+
+    // 36. CORS Security: Production Vercel Origin Allowed
+    const corsVercelRes = await request('GET', '/api/health', null, null, {
+      'Origin': 'https://common-customer-feedback-system.vercel.app',
+    });
+    recordTest(
+      'CORS Policy: Deployed Vercel Origin Permitted',
+      corsVercelRes.status === 200 &&
+        corsVercelRes.headers['access-control-allow-origin'] === 'https://common-customer-feedback-system.vercel.app',
+      `status=${corsVercelRes.status}, allow_origin=${corsVercelRes.headers['access-control-allow-origin']}`
+    );
+
+    // 37. CORS Security: Localhost Development Origin Allowed
+    const corsLocalRes = await request('GET', '/api/health', null, null, {
+      'Origin': 'http://localhost:5173',
+    });
+    recordTest(
+      'CORS Policy: Local Development Origin Permitted',
+      corsLocalRes.status === 200 &&
+        corsLocalRes.headers['access-control-allow-origin'] === 'http://localhost:5173',
+      `status=${corsLocalRes.status}, allow_origin=${corsLocalRes.headers['access-control-allow-origin']}`
+    );
+
+    // 38. CORS Security: Unauthorized Origin Blocked with 403
+    const corsBlockedRes = await request('GET', '/api/health', null, null, {
+      'Origin': 'https://unauthorized-attacker.example.com',
+    });
+    recordTest(
+      'CORS Policy: Unauthorized Foreign Origin Blocked (403)',
+      corsBlockedRes.status === 403,
+      `status=${corsBlockedRes.status}, message=${corsBlockedRes.body?.message || corsBlockedRes.body}`
     );
 
   } finally {

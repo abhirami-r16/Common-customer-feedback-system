@@ -1,32 +1,59 @@
 /**
- * Safe, additive database setup script.
- * Never drops tables or deletes records.
- * Uses CREATE TABLE IF NOT EXISTS.
+ * Safe, additive database schema initialization script.
+ * Supports Aiven MySQL and cloud managed instances with SSL/TLS certificate verification.
+ *
+ * Strict safety rules:
+ * - Never drops or truncates tables.
+ * - Uses CREATE TABLE IF NOT EXISTS exclusively.
+ * - Connects directly to the existing database (defaultdb) without attempting CREATE DATABASE.
+ * - NEVER automatically seeds sample users, forms, or submissions into production.
+ * - Uses the shared MySQL pool with verified TLS.
+ * - Performs post-creation table verification to guarantee all 8 tables exist.
+ * - Exits with a non-zero code on any failure.
  */
-const mysql = require('mysql2/promise');
 const config = require('../src/config');
+const db = require('../src/config/database');
 
 async function initDb() {
-  console.log(`Connecting to MySQL host: ${config.db.host}:${config.db.port}...`);
+  const isSsl = Boolean(config.db.ssl);
+  console.log(`====================================================`);
+  console.log(`Database Schema Initialization`);
+  console.log(`Loaded Env: ${config.envPath || 'backend-node/.env'}`);
+  console.log(`Host: ${config.db.host}:${config.db.port}`);
+  console.log(`Database: ${config.db.database}`);
+  console.log(`User: ${config.db.user}`);
+  console.log(`SSL/TLS: ${isSsl ? `Enabled (rejectUnauthorized: ${config.db.ssl.rejectUnauthorized})` : 'Disabled'}`);
+  console.log(`====================================================`);
 
-  // Connect without database first to ensure database exists
-  const connection = await mysql.createConnection({
-    host: config.db.host,
-    port: config.db.port,
-    user: config.db.user,
-    password: config.db.password,
-  });
+  const pool = db.getPool();
 
   try {
-    const dbName = config.db.database;
-    console.log(`Ensuring database \`${dbName}\` exists (non-destructive)...`);
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-    await connection.query(`USE \`${dbName}\``);
+    console.log(`Acquiring connection from shared MySQL pool for \`${config.db.database}\`...`);
+    const testConn = await pool.getConnection();
+    testConn.release();
+    console.log(`[Success] Connected to database \`${config.db.database}\` via shared pool.`);
+  } catch (err) {
+    console.error('\n[Database Connection Error]:');
+    if (err.code === 'ECONNREFUSED') {
+      console.error(`- Connection refused to ${config.db.host}:${config.db.port}. Please verify the host and port.`);
+    } else if (err.code === 'ER_ACCESS_DENIED_ERROR') {
+      console.error(`- Access denied for user '${config.db.user}'. Please check username and password.`);
+    } else if (err.code === 'ER_BAD_DB_ERROR') {
+      console.error(`- Database '${config.db.database}' does not exist on the server. For Aiven MySQL, ensure DB_DATABASE=defaultdb.`);
+    } else if (err.message && (err.message.includes('SSL') || err.message.includes('certificate') || err.code === 'HANDSHAKE_SSL_ERROR')) {
+      console.error(`- SSL Handshake / Certificate Verification Error: ${err.message}`);
+      console.error('  If using Aiven, ensure the Aiven CA certificate (ca.pem) is downloaded and configured via DB_SSL_CA_PATH or placed in backend-node/.');
+    } else {
+      console.error(`- ${err.message} (${err.code || 'UNKNOWN_CODE'})`);
+    }
+    throw err;
+  }
 
-    console.log('Creating schema tables if they do not exist...');
+  try {
+    console.log('\nCreating schema tables if they do not exist (non-destructive)...');
 
     // 1. Users table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
@@ -42,7 +69,7 @@ async function initDb() {
     `);
 
     // 2. Password Reset Tokens table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS password_reset_tokens (
         email VARCHAR(255) PRIMARY KEY,
         token VARCHAR(255) NOT NULL,
@@ -51,7 +78,7 @@ async function initDb() {
     `);
 
     // 3. Personal Access Tokens table (Laravel Sanctum compatible)
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS personal_access_tokens (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         tokenable_type VARCHAR(255) NOT NULL,
@@ -68,7 +95,7 @@ async function initDb() {
     `);
 
     // 4. Feedback Forms table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS feedback_forms (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         user_id BIGINT UNSIGNED NOT NULL,
@@ -83,7 +110,7 @@ async function initDb() {
     `);
 
     // 5. Form Sections table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS form_sections (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         feedback_form_id BIGINT UNSIGNED NOT NULL,
@@ -97,7 +124,7 @@ async function initDb() {
     `);
 
     // 6. Form Questions table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS form_questions (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         form_section_id BIGINT UNSIGNED NOT NULL,
@@ -113,7 +140,7 @@ async function initDb() {
     `);
 
     // 7. Question Options table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS question_options (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         form_question_id BIGINT UNSIGNED NOT NULL,
@@ -126,7 +153,7 @@ async function initDb() {
     `);
 
     // 8. Feedback Submissions table
-    await connection.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS feedback_submissions (
         id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         feedback_form_id BIGINT UNSIGNED NOT NULL,
@@ -144,68 +171,42 @@ async function initDb() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
-    console.log('[Schema] All 8 tables verified successfully.');
+    console.log('\nVerifying created schema tables in database...');
+    const expectedTables = [
+      'users',
+      'password_reset_tokens',
+      'personal_access_tokens',
+      'feedback_forms',
+      'form_sections',
+      'form_questions',
+      'question_options',
+      'feedback_submissions',
+    ];
 
-    // Check if users table is empty; if so, populate initial seed data
-    const [userRows] = await connection.query('SELECT COUNT(*) as count FROM users');
-    if (userRows[0].count === 0) {
-      console.log('[Seed] Users table is empty. Populating baseline data with preserved IDs...');
+    const [tableRows] = await pool.query('SHOW TABLES');
+    const existingTables = tableRows.map((r) => Object.values(r)[0]);
 
-      // Insert baseline users
-      await connection.query(`
-        INSERT INTO users (id, name, email, password, organization_name, role, created_at, updated_at) VALUES
-        (2, 'Abhirami.R', 'abhiramiabhiivk@gmail.com', '$2y$12$QPZgl1BOvgAUtUoC.ydu8Ovpz28qRY0vTGo3MaehXB/Dwf0wj8nga', 'Abhi designs', 'business', '2026-10-21 07:13:21', '2026-10-21 10:27:52'),
-        (3, 'System Administrator', 'admin@gmail.com', '$2y$12$OKqJiwQpLSPL2ba/eUCFLOR0DsSqCShEf4gqreXMyYEag3fOyQP5a', 'FeedbackHub Platform', 'admin', '2026-10-21 10:42:50', '2026-10-23 08:06:39'),
-        (7, 'Akhila', 'akhila@gmail.com', '$2y$12$kpYSSAsrCVyPS/0SmcKrh.Ul8y35s01tvE2qRxoQXfmjxIw/GwCgy', 'Akx living', 'business', '2026-10-26 05:53:54', '2026-10-27 07:17:05')
-      `);
-
-      // Insert baseline forms
-      await connection.query(`
-        INSERT INTO feedback_forms (id, user_id, title, slug, status, created_at, updated_at) VALUES
-        (12, 2, 'customer feedback', 'customer-feedback-qduper', 'published', '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (13, 7, 'customer feedback', 'customer-feedback-aal4jp', 'draft', '2026-10-26 06:00:47', '2026-10-26 06:00:47')
-      `);
-
-      // Insert baseline sections
-      await connection.query(`
-        INSERT INTO form_sections (id, feedback_form_id, title, position, created_at, updated_at) VALUES
-        (12, 12, 'General Feedback', 0, '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (13, 13, 'General Feedback', 0, '2026-10-26 06:00:47', '2026-10-26 06:00:47')
-      `);
-
-      // Insert baseline questions
-      await connection.query(`
-        INSERT INTO form_questions (id, form_section_id, question_text, question_type, is_required, settings, position, created_at, updated_at) VALUES
-        (30, 12, 'How satisfied are you with our overall service?', 'star_rating', 1, '{"max_rating":5}', 0, '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (31, 12, 'Which aspect of our service did you use most?', 'multiple_choice', 0, '[]', 1, '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (33, 13, 'how satisfied you are', 'multiple_choice', 0, '[]', 0, '2026-10-26 06:00:47', '2026-10-26 06:00:47')
-      `);
-
-      // Insert baseline question options
-      await connection.query(`
-        INSERT INTO question_options (id, form_question_id, option_text, position, created_at, updated_at) VALUES
-        (31, 31, 'Customer Support', 0, '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (32, 31, 'Fast Delivery', 1, '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (33, 31, 'Product Quality', 2, '2026-10-21 08:37:27', '2026-10-21 08:37:27'),
-        (34, 33, 'customer feedback', 0, '2026-10-26 06:00:47', '2026-10-26 06:00:47'),
-        (35, 33, 'quality', 1, '2026-10-26 06:00:47', '2026-10-26 06:00:47')
-      `);
-
-      // Insert baseline submissions
-      await connection.query(`
-        INSERT INTO feedback_submissions (id, feedback_form_id, customer_name, customer_email, rating, summary_preview, review_status, ip_address, client_token, created_at, updated_at) VALUES
-        (8, 12, 'Abhirami.R', 'abhiramiabhiivk@gmail.com', 5, 'How satisfied are you with our overall service?: 5 | Which aspect of our service did you use most?: Customer Support | h: hhh', 'new', NULL, NULL, '2026-10-21 08:38:00', '2026-10-21 08:38:00'),
-        (9, 13, 'abhirami', 'abhiramiabhiivk@gmail.com', 5, 'how satisfied you are: customer feedback', 'new', '127.0.0.1', 'usr_tey65a7mvg_mvm1tlev', '2026-10-26 06:01:00', '2026-10-26 06:01:00')
-      `);
-
-      console.log('[Seed] Baseline records seeded successfully.');
-    } else {
-      console.log(`[Seed] Database already contains ${userRows[0].count} users. Preserving all existing records.`);
+    const missingTables = expectedTables.filter((t) => !existingTables.includes(t));
+    if (missingTables.length > 0) {
+      throw new Error(`Schema verification failed. Missing tables: ${missingTables.join(', ')}`);
     }
 
-    console.log('[Init] Database initialization complete.');
+    console.log('[Schema] All 8 schema tables verified / initialized successfully:');
+    for (const t of expectedTables) {
+      console.log(` - ${t} [VERIFIED]`);
+    }
+
+    console.log('\n[Production Safety] Verified: No sample users or demo submissions were seeded.');
+    console.log('[Init] Database schema initialization complete.');
+  } catch (err) {
+    console.error('\n[Schema Initialization Error]:', err.message || err);
+    throw err;
   } finally {
-    await connection.end();
+    try {
+      await pool.end();
+    } catch (e) {
+      // Ignore pool close error
+    }
   }
 }
 
@@ -213,7 +214,7 @@ if (require.main === module) {
   initDb()
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[Init Error]:', err);
+      console.error('\n[Fatal Error]: Database initialization failed.', err.message || err);
       process.exit(1);
     });
 }

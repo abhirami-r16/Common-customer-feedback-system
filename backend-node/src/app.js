@@ -12,19 +12,24 @@ app.set('trust proxy', 1);
 // Configure CORS
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow non-browser requests (e.g. mobile apps, curl, server-to-server)
+    // Allow non-browser requests (e.g. mobile apps, curl, server-to-server, automated tests)
     if (!origin) return callback(null, true);
 
+    const normalizedOrigin = origin.trim().replace(/\/$/, '').toLowerCase();
     const isAllowed = config.allowedOrigins.some((allowed) => {
-      if (allowed === '*') return true;
-      return allowed.toLowerCase() === origin.toLowerCase();
+      // Never allow wildcard in production
+      if (allowed === '*' && config.nodeEnv !== 'production') {
+        return true;
+      }
+      return allowed.trim().replace(/\/$/, '').toLowerCase() === normalizedOrigin;
     });
 
     if (isAllowed) {
       callback(null, true);
     } else {
-      // In production log warning, but don't crash
-      callback(null, true); // Permissive fallback to match Laravel's open CORS
+      const corsError = new Error(`Origin '${origin}' is not permitted by CORS policy.`);
+      corsError.status = 403;
+      callback(corsError);
     }
   },
   credentials: true,

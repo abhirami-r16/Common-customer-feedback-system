@@ -2,38 +2,49 @@ const app = require('./app');
 const config = require('./config');
 const db = require('./config/database');
 
-const server = app.listen(config.port, async () => {
-  console.log(`====================================================`);
-  console.log(`Common Customer Feedback System API (Node.js)`);
-  console.log(`Environment: ${config.nodeEnv}`);
-  console.log(`Server listening on port: ${config.port}`);
-  console.log(`API Base URL: http://localhost:${config.port}/api`);
-  console.log(`Health Check: http://localhost:${config.port}/api/health`);
-  console.log(`====================================================`);
+let server = null;
 
-  try {
-    await db.testConnection();
-    console.log(`[Database] Successfully connected to MySQL at ${config.db.host}:${config.db.port}/${config.db.database}`);
-  } catch (err) {
-    console.error(`[Database] Warning: Could not establish immediate MySQL connection: ${err.message}`);
-    console.error(`[Database] Verify that MySQL service is running and credentials in .env are valid.`);
-  }
-});
+// Only bind to a network port when running standalone/locally, not in Vercel's serverless environment
+if (!process.env.VERCEL) {
+  server = app.listen(config.port, async () => {
+    console.log(`====================================================`);
+    console.log(`Common Customer Feedback System API (Node.js)`);
+    console.log(`Environment: ${config.nodeEnv}`);
+    console.log(`Server listening on port: ${config.port}`);
+    console.log(`API Base URL: http://localhost:${config.port}/api`);
+    console.log(`Health Check: http://localhost:${config.port}/api/health`);
+    console.log(`====================================================`);
 
-function gracefulShutdown(signal) {
-  console.log(`\nReceived ${signal}. Shutting down gracefully...`);
-  server.close(async () => {
     try {
-      const pool = db.getPool();
-      await pool.end();
-      console.log('[Database] Connection pool closed.');
-    } catch (e) {
-      // Ignore
+      await db.testConnection();
+      console.log(`[Database] Successfully connected to MySQL at ${config.db.host}:${config.db.port}/${config.db.database}`);
+    } catch (err) {
+      console.error(`[Database] Warning: Could not establish immediate MySQL connection: ${err.message}`);
+      console.error(`[Database] Verify that MySQL service is running and credentials in .env are valid.`);
     }
-    console.log('HTTP server closed. Exiting process.');
-    process.exit(0);
   });
+
+  function gracefulShutdown(signal) {
+    console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+    if (server) {
+      server.close(async () => {
+        try {
+          const pool = db.getPool();
+          await pool.end();
+          console.log('[Database] Connection pool closed.');
+        } catch (e) {
+          // Ignore
+        }
+        console.log('HTTP server closed. Exiting process.');
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+  }
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+module.exports = app;

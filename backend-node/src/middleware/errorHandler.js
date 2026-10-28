@@ -19,8 +19,6 @@ function errorHandler(err, req, res, next) {
     return next(err);
   }
 
-  console.error('Unhandled Application Error:', err);
-
   // Handle Zod validation errors
   if (err.name === 'ZodError') {
     const formattedErrors = {};
@@ -47,6 +45,7 @@ function errorHandler(err, req, res, next) {
   }
 
   // Default 500 Internal Server Error
+  console.error('Unhandled Application Error:', err);
   const response = {
     message: 'An unexpected internal server error occurred.',
   };
